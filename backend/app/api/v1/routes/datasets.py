@@ -22,6 +22,102 @@ from app.notebooks.readme_generator import ReadmeGenerator
 router = APIRouter(tags=["datasets"])
 
 
+def _readme_html_document(*, dataset_name: str, body_html: str) -> str:
+    safe_name = "".join(ch for ch in str(dataset_name or "Dataset") if ch.isprintable())
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{safe_name} · README</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Merriweather:wght@700;900&family=Source+Sans+3:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+    :root {{
+      --bg: #f6f8fb;
+      --card: #ffffff;
+      --text: #17202a;
+      --muted: #4a5568;
+      --accent: #0e5d8f;
+      --border: #d7dfe7;
+      --code-bg: #f3f6fa;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: radial-gradient(circle at 20% 0%, #eef6ff 0%, var(--bg) 45%);
+      color: var(--text);
+      font-family: 'Source Sans 3', 'Segoe UI', Arial, sans-serif;
+      line-height: 1.7;
+      padding: 2rem 1rem 3rem;
+    }}
+    main {{
+      max-width: 980px;
+      margin: 0 auto;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 10px 28px rgba(9, 30, 66, 0.08);
+      padding: 2rem;
+    }}
+    h1, h2, h3, h4 {{
+      font-family: 'Merriweather', Georgia, serif;
+      color: #0b2f4a;
+      line-height: 1.3;
+      margin-top: 1.2em;
+    }}
+    h1 {{ font-size: 2rem; margin-top: 0.2em; }}
+    h2 {{ font-size: 1.45rem; border-bottom: 1px solid #e9eef5; padding-bottom: 0.35rem; }}
+    p, li {{ font-size: 1.05rem; }}
+    code, pre {{
+      font-family: 'JetBrains Mono', 'Consolas', monospace;
+      font-size: 0.92rem;
+      background: var(--code-bg);
+    }}
+    pre {{
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.9rem;
+      overflow-x: auto;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0;
+      font-size: 0.98rem;
+    }}
+    th, td {{
+      border: 1px solid var(--border);
+      padding: 0.55rem 0.7rem;
+      text-align: left;
+      vertical-align: top;
+    }}
+    th {{
+      background: #eaf2fb;
+      color: #17384f;
+      font-weight: 700;
+    }}
+    a {{
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid rgba(14, 93, 143, 0.25);
+    }}
+    blockquote {{
+      margin: 1rem 0;
+      padding: 0.75rem 1rem;
+      border-left: 4px solid #7aa7c8;
+      background: #f5faff;
+      color: var(--muted);
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    {body_html}
+  </main>
+</body>
+</html>"""
+
+
 def _cleanup_files(paths: list[str]) -> None:
     for path in paths:
         if path and os.path.exists(path):
@@ -303,8 +399,9 @@ async def get_readme(
     if fmt == "html":
         import markdown
 
-        html = markdown.markdown(readme_md, extensions=["tables", "fenced_code"])
-        return HTMLResponse(content=html)
+        html_body = markdown.markdown(readme_md, extensions=["tables", "fenced_code"])
+        html_doc = _readme_html_document(dataset_name=dataset.name, body_html=html_body)
+        return HTMLResponse(content=html_doc)
 
     if fmt != "markdown":
         raise HTTPException(status_code=400, detail="format must be 'markdown' or 'html'")

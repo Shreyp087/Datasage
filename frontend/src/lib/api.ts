@@ -21,8 +21,21 @@ api.interceptors.request.use(
         .replace(/^\/?api\/v1\//, '')
         .replace(/^\/+/, '');
     }
-    // const token = localStorage.getItem('token');
-    // if (token) config.headers.Authorization = `Bearer ${token}`;
+    if (typeof window !== 'undefined') {
+      const token = localStorage.getItem('access_token') || localStorage.getItem('token');
+      if (token) {
+        const headers: any = config.headers ?? {};
+        const existing = typeof headers.get === 'function' ? headers.get('Authorization') : headers.Authorization;
+        if (!existing) {
+          if (typeof headers.set === 'function') {
+            headers.set('Authorization', `Bearer ${token}`);
+          } else {
+            headers.Authorization = `Bearer ${token}`;
+          }
+        }
+        config.headers = headers;
+      }
+    }
     return config;
   },
   (error) => Promise.reject(error)

@@ -4,7 +4,8 @@ import Dashboard from './pages/Dashboard';
 import Upload from './pages/Upload';
 import DatasetDetails from './pages/DatasetDetails';
 import MergeStudio from './pages/MergeStudio';
-import { Database, UploadCloud, Link as LinkIcon } from 'lucide-react';
+import NotebookDashboard from './pages/NotebookDashboard';
+import { BookOpen, Database, UploadCloud, Link as LinkIcon } from 'lucide-react';
 
 function App() {
     return (
@@ -27,6 +28,9 @@ function App() {
                         <Link to="/merge" className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-[#21262d] transition-colors">
                             <LinkIcon size={18} /> Merge Studio
                         </Link>
+                        <Link to="/notebooks" className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-[#21262d] transition-colors">
+                            <BookOpen size={18} /> Notebook Dashboard
+                        </Link>
                     </nav>
                 </aside>
 
@@ -37,6 +41,7 @@ function App() {
                         <Route path="/upload" element={<Upload />} />
                         <Route path="/dataset/:id" element={<DatasetDetails />} />
                         <Route path="/merge" element={<MergeStudio />} />
+                        <Route path="/notebooks" element={<NotebookDashboard />} />
                     </Routes>
                 </main>
             </div>

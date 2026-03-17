@@ -7,6 +7,11 @@ export const datasetsApi = {
   getReports: (id: string) => axiosClient.get(`/api/v1/datasets/${id}/reports`),
   getEDA: (id: string) => axiosClient.get(`/api/v1/datasets/${id}/eda`),
   getJob: (id: string) => axiosClient.get(`/api/v1/datasets/${id}/job`),
+  getReadme: (id: string, format: 'markdown' | 'html' = 'markdown') =>
+    axiosClient.get(`/api/v1/datasets/${id}/readme`, {
+      params: { format },
+      responseType: 'blob',
+    }),
   download: (id: string, format: string) =>
     axiosClient.get(`/api/v1/datasets/${id}/download?format=${format}`, {
       responseType: 'blob',

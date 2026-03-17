@@ -33,15 +33,22 @@ async def get_or_create_system_user(db: AsyncSession) -> uuid.UUID:
 async def seed_aiid_template(db: AsyncSession) -> None:
     """
     Run on startup: ensure the AIID template notebook exists in DB.
-    Idempotent - only creates if not already present.
+    Idempotent - creates when missing and refreshes content when present.
     """
-    existing = await db.execute(
+    existing_result = await db.execute(
         select(Notebook).where(
             Notebook.title == AIID_TEMPLATE["title"],
             Notebook.is_template.is_(True),
         ).limit(1)
     )
-    if existing.scalar_one_or_none():
+    existing = existing_result.scalar_one_or_none()
+    if existing:
+        existing.description = AIID_TEMPLATE["description"]
+        existing.domain = AIID_TEMPLATE["domain"]
+        existing.cells = deepcopy(AIID_TEMPLATE["cells"])
+        existing.tags = AIID_TEMPLATE["tags"]
+        existing.is_public = True
+        await db.commit()
         return
 
     system_user_id = await get_or_create_system_user(db)

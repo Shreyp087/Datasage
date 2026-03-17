@@ -75,12 +75,20 @@ export default function Dashboard() {
     <div className="max-w-7xl mx-auto space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-3xl font-bold text-white">Platform Overview</h2>
-        <Link
-          to="/upload"
-          className="bg-[#1f6feb] hover:bg-blue-600 text-white px-5 py-2 rounded-md font-medium transition-colors flex items-center gap-2"
-        >
-          New Upload <ArrowRight size={16} />
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link
+            to="/notebooks"
+            className="bg-[#1f2b40] hover:bg-[#2d3f5f] text-white px-5 py-2 rounded-md font-medium transition-colors flex items-center gap-2"
+          >
+            Notebook Dashboard <ArrowRight size={16} />
+          </Link>
+          <Link
+            to="/upload"
+            className="bg-[#1f6feb] hover:bg-blue-600 text-white px-5 py-2 rounded-md font-medium transition-colors flex items-center gap-2"
+          >
+            New Upload <ArrowRight size={16} />
+          </Link>
+        </div>
       </div>
 
       {error && (

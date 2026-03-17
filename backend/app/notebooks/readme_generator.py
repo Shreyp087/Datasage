@@ -237,6 +237,24 @@ print(df.head())
                 section += f"- **Date Range:** {dr.get('earliest', 'Unknown')} to {dr.get('latest', 'Unknown')}\n"
                 section += f"- **Top Harm Type:** {summary_result.get('top_harm_type', 'N/A')}\n"
                 section += f"- **Top Sector:** {summary_result.get('top_sector', 'N/A')}\n"
+
+            detailed_result = ((notebook_results or {}).get("cell_013", {}) or {}).get("result", {})
+            if isinstance(detailed_result, dict) and detailed_result:
+                highlights = detailed_result.get("highlights", [])
+                coverage = detailed_result.get("coverage", {})
+                if highlights:
+                    section += "\n### 🧠 Detailed Notebook Summary\n\n"
+                    for item in highlights[:6]:
+                        section += f"- {item}\n"
+                if isinstance(coverage, dict) and coverage:
+                    section += "\n### ✅ Classification Coverage\n\n"
+                    section += f"- Harm Type Coverage: {float(coverage.get('harm_type_pct', 0.0)):.1f}%\n"
+                    section += (
+                        f"- Sector Coverage: "
+                        f"{float(coverage.get('sector_of_deployment_pct', 0.0)):.1f}%\n"
+                    )
+                    section += f"- Deployer Coverage: {float(coverage.get('deployer_pct', 0.0)):.1f}%\n"
+                    section += f"- Developer Coverage: {float(coverage.get('developer_pct', 0.0)):.1f}%\n"
         return section
 
     def _dail_section(self, dataset: Dataset, eda_json: dict[str, Any]) -> str:

@@ -1,11 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import * as Tabs from '@radix-ui/react-tabs';
-import { BarChart2, Bot, Download, List } from 'lucide-react';
+import { BarChart2, Bot, Download, Eye, FileText, List, Play } from 'lucide-react';
 
 import { datasetsApi } from '../api/datasets';
+import { notebooksApi } from '../api/notebooks';
 import AgentReportCard from '../components/reports/AgentReportCard';
 import EDAReportViewer from '../components/reports/EDAReportViewer';
+import { useJobProgress } from '../hooks/useJobProgress';
 
 type DatasetRecord = {
   id: string;
@@ -34,6 +36,17 @@ type JobRecord = {
   error_message: string | null;
 };
 
+type NotebookRecord = {
+  id: string;
+  dataset_id: string | null;
+  is_template: boolean;
+  run_count?: number;
+  results?: Record<string, unknown>;
+  last_run_at?: string | null;
+  updated_at?: string | null;
+  created_at?: string | null;
+};
+
 export default function DatasetDetails() {
   const { id } = useParams();
   const [activeTab, setActiveTab] = useState('overview');
@@ -41,6 +54,18 @@ export default function DatasetDetails() {
   const [reports, setReports] = useState<AgentReport[]>([]);
   const [job, setJob] = useState<JobRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [readmeLoading, setReadmeLoading] = useState<'markdown' | 'html' | null>(null);
+  const [readmeStatus, setReadmeStatus] = useState<string | null>(null);
+  const [readmeError, setReadmeError] = useState<string | null>(null);
+  const [notebookLaunching, setNotebookLaunching] = useState(false);
+  const [notebookStatus, setNotebookStatus] = useState<string | null>(null);
+  const [notebookError, setNotebookError] = useState<string | null>(null);
+  const [notebookId, setNotebookId] = useState<string | null>(null);
+  const [notebookJobId, setNotebookJobId] = useState<string | null>(null);
+  const [notebookRunCount, setNotebookRunCount] = useState<number | null>(null);
+  const [notebookResultCount, setNotebookResultCount] = useState<number | null>(null);
+  const [notebookExportLoading, setNotebookExportLoading] = useState<'html' | 'jupyter' | null>(null);
+  const notebookProgress = useJobProgress(notebookJobId);
 
   useEffect(() => {
     if (!id) return;
@@ -75,6 +100,59 @@ export default function DatasetDetails() {
     return synth?.id || orderedReports[0]?.id || null;
   }, [orderedReports]);
 
+  const safeDatasetName = useMemo(() => {
+    return (dataset?.name || `dataset_${id?.slice(0, 8) || 'unknown'}`).replace(/[^a-zA-Z0-9._-]+/g, '_');
+  }, [dataset?.name, id]);
+
+  const toTimestamp = (value?: string | null) => {
+    if (!value) return 0;
+    const ts = Date.parse(value);
+    return Number.isNaN(ts) ? 0 : ts;
+  };
+
+  useEffect(() => {
+    if (!id) return;
+
+    let cancelled = false;
+
+    const loadLatestNotebook = async () => {
+      try {
+        const response = await notebooksApi.list({ is_template: false });
+        const all = (response?.data || []) as NotebookRecord[];
+        const datasetNotebooks = all.filter((item) => !item.is_template && item.dataset_id === id);
+        if (!datasetNotebooks.length) {
+          if (!cancelled) {
+            setNotebookId(null);
+            setNotebookRunCount(null);
+            setNotebookResultCount(null);
+          }
+          return;
+        }
+
+        const latest = [...datasetNotebooks].sort((a, b) => {
+          const bTs = toTimestamp(b.last_run_at) || toTimestamp(b.updated_at) || toTimestamp(b.created_at);
+          const aTs = toTimestamp(a.last_run_at) || toTimestamp(a.updated_at) || toTimestamp(a.created_at);
+          return bTs - aTs;
+        })[0];
+
+        if (cancelled) return;
+
+        setNotebookId(latest.id);
+        setNotebookRunCount(Number(latest.run_count || 0));
+        const resultMap = latest.results && typeof latest.results === 'object' ? latest.results : {};
+        setNotebookResultCount(Object.keys(resultMap).length);
+      } catch {
+        // Keep notebook actions available only after explicit run if list fails.
+      }
+    };
+
+    loadLatestNotebook();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
   const handleDownload = async (format: 'csv' | 'parquet') => {
     if (!id) return;
     const response = await datasetsApi.download(id, format);
@@ -88,6 +166,132 @@ export default function DatasetDetails() {
     link.remove();
     window.URL.revokeObjectURL(url);
   };
+
+  const triggerDownload = (blob: Blob, filename: string) => {
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
+  const openInNewTab = (blob: Blob) => {
+    const url = window.URL.createObjectURL(blob);
+    window.open(url, '_blank', 'noopener,noreferrer');
+    window.setTimeout(() => window.URL.revokeObjectURL(url), 60000);
+  };
+
+  const handleReadme = async (format: 'markdown' | 'html') => {
+    if (!id) return;
+    setReadmeLoading(format);
+    setReadmeError(null);
+    setReadmeStatus(null);
+
+    try {
+      const response = await datasetsApi.getReadme(id, format);
+      const blob = response.data instanceof Blob ? response.data : new Blob([response.data]);
+
+      if (format === 'markdown') {
+        triggerDownload(blob, `${safeDatasetName}_README.md`);
+        setReadmeStatus('README markdown downloaded.');
+      } else {
+        openInNewTab(blob);
+        setReadmeStatus('README HTML opened in a new tab.');
+      }
+    } catch (err: any) {
+      setReadmeError(err?.response?.data?.detail || err?.message || 'Failed to generate README.');
+    } finally {
+      setReadmeLoading(null);
+    }
+  };
+
+  const handleNotebookExport = async (format: 'html' | 'jupyter') => {
+    if (!notebookId) return;
+
+    setNotebookExportLoading(format);
+    setNotebookError(null);
+
+    try {
+      const response = await notebooksApi.export(notebookId, format);
+      const blob = response.data instanceof Blob ? response.data : new Blob([response.data]);
+
+      if (format === 'jupyter') {
+        triggerDownload(blob, `${safeDatasetName}_Notebook.ipynb`);
+        setNotebookStatus('Notebook downloaded (.ipynb).');
+      } else {
+        openInNewTab(blob);
+        setNotebookStatus('Notebook opened in a new tab (HTML view).');
+      }
+    } catch (err: any) {
+      setNotebookError(err?.response?.data?.detail || err?.message || 'Failed to export notebook.');
+    } finally {
+      setNotebookExportLoading(null);
+    }
+  };
+
+  const handleRunNotebook = async () => {
+    if (!id) return;
+    setNotebookLaunching(true);
+    setNotebookError(null);
+    setNotebookStatus(null);
+    setNotebookRunCount(null);
+    setNotebookResultCount(null);
+    setNotebookId(null);
+    setNotebookJobId(null);
+
+    try {
+      const generateResponse = await notebooksApi.generateForDataset(id, {
+        title: `${dataset?.name || 'Dataset'} Notebook`,
+        run_now: true,
+        replace_existing: true,
+      });
+      const createdNotebookId = generateResponse?.data?.notebook?.id as string | undefined;
+      if (!createdNotebookId) {
+        throw new Error('Notebook generation failed.');
+      }
+      const createdJobId = generateResponse?.data?.job_id as string | undefined;
+      if (!createdJobId) {
+        throw new Error('Notebook run job was not created during generation.');
+      }
+
+      setNotebookId(createdNotebookId);
+      setNotebookJobId(createdJobId);
+      setNotebookStatus(`Notebook run started. Job ID: ${createdJobId}`);
+    } catch (err: any) {
+      setNotebookError(err?.response?.data?.detail || err?.message || 'Failed to run notebook.');
+    } finally {
+      setNotebookLaunching(false);
+    }
+  };
+
+  useEffect(() => {
+    const step = (notebookProgress.step || '').toLowerCase();
+    if (!notebookId || !step) return;
+
+    if (step === 'failed') {
+      setNotebookError(notebookProgress.message || 'Notebook run failed.');
+      return;
+    }
+    if (step !== 'complete') return;
+
+    const fetchNotebook = async () => {
+      try {
+        const res = await notebooksApi.get(notebookId);
+        const data = res?.data || {};
+        const resultMap = data?.results && typeof data.results === 'object' ? data.results : {};
+        setNotebookRunCount(Number(data?.run_count || 0));
+        setNotebookResultCount(Object.keys(resultMap).length);
+        setNotebookStatus('Notebook run completed successfully.');
+      } catch {
+        setNotebookStatus('Notebook run completed.');
+      }
+    };
+
+    fetchNotebook();
+  }, [notebookId, notebookProgress.message, notebookProgress.step]);
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -114,7 +318,7 @@ export default function DatasetDetails() {
             </p>
           )}
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap justify-end">
           <button
             onClick={() => handleDownload('csv')}
             className="bg-[#21262d] hover:bg-[#30363d] text-white px-4 py-2 border border-[#30363d] rounded-md font-medium transition-colors flex items-center gap-2"
@@ -127,8 +331,79 @@ export default function DatasetDetails() {
           >
             <Download size={16} /> Parquet
           </button>
+          <button
+            onClick={() => handleReadme('markdown')}
+            disabled={readmeLoading !== null}
+            className="bg-[#1f2b40] hover:bg-[#2d3f5f] text-white px-4 py-2 border border-[#30363d] rounded-md font-medium transition-colors flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            <FileText size={16} /> {readmeLoading === 'markdown' ? 'Generating...' : 'README .md'}
+          </button>
+          <button
+            onClick={() => handleReadme('html')}
+            disabled={readmeLoading !== null}
+            className="bg-[#1f2b40] hover:bg-[#2d3f5f] text-white px-4 py-2 border border-[#30363d] rounded-md font-medium transition-colors flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            <FileText size={16} /> {readmeLoading === 'html' ? 'Generating...' : 'README HTML'}
+          </button>
+          <button
+            onClick={handleRunNotebook}
+            disabled={notebookLaunching || !id || dataset?.status !== 'complete'}
+            className="bg-[#0d4a38] hover:bg-[#12634b] text-white px-4 py-2 border border-[#2ea043] rounded-md font-medium transition-colors flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            <Play size={16} /> {notebookLaunching ? 'Starting...' : 'Run Notebook'}
+          </button>
+          <button
+            onClick={() => handleNotebookExport('html')}
+            disabled={!notebookId || notebookExportLoading !== null}
+            className="bg-[#3f2d1f] hover:bg-[#5a4029] text-white px-4 py-2 border border-[#6b4d31] rounded-md font-medium transition-colors flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+            title={notebookId ? 'Open notebook as HTML in a new tab' : 'Run notebook first'}
+          >
+            <Eye size={16} /> {notebookExportLoading === 'html' ? 'Opening...' : 'View Notebook'}
+          </button>
+          <button
+            onClick={() => handleNotebookExport('jupyter')}
+            disabled={!notebookId || notebookExportLoading !== null}
+            className="bg-[#3f2d1f] hover:bg-[#5a4029] text-white px-4 py-2 border border-[#6b4d31] rounded-md font-medium transition-colors flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+            title={notebookId ? 'Download notebook as .ipynb' : 'Run notebook first'}
+          >
+            <Download size={16} /> {notebookExportLoading === 'jupyter' ? 'Downloading...' : 'Download Notebook'}
+          </button>
         </div>
       </div>
+
+      {(readmeStatus || readmeError || notebookStatus || notebookError || notebookJobId) && (
+        <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 space-y-3">
+          {readmeStatus && <p className="text-[#3fb950] text-sm">{readmeStatus}</p>}
+          {readmeError && <p className="text-[#f85149] text-sm">{readmeError}</p>}
+          {notebookStatus && <p className="text-[#58a6ff] text-sm">{notebookStatus}</p>}
+          {notebookError && <p className="text-[#f85149] text-sm">{notebookError}</p>}
+
+          {notebookJobId && (
+            <div className="space-y-2">
+              <div className="text-xs text-gray-400">
+                Notebook progress: {(notebookProgress.step || 'queued').toString()} ({Math.round(notebookProgress.pct || 0)}%)
+              </div>
+              <div className="w-full h-2 bg-[#0d1117] rounded-full border border-[#30363d] overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-[#58a6ff] to-[#3fb950] transition-all duration-500"
+                  style={{ width: `${Math.max(0, Math.min(100, notebookProgress.pct || 0))}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {(notebookRunCount !== null || notebookResultCount !== null) && (
+            <div className="text-xs text-gray-300 font-mono">
+              Notebook ID: {notebookId ?? '-'} | Run count: {notebookRunCount ?? '-'} | Result cells: {notebookResultCount ?? '-'}
+            </div>
+          )}
+          {!notebookId && (
+            <div className="text-xs text-gray-500">
+              No notebook found for this dataset yet. Click <strong>Run Notebook</strong> first.
+            </div>
+          )}
+        </div>
+      )}
 
       <Tabs.Root value={activeTab} onValueChange={setActiveTab}>
         <Tabs.List className="flex border-b border-[#30363d] mb-6">

@@ -73,6 +73,26 @@ def test_run_summary_cell():
     assert result["top_harm_type"] == "Bias"
 
 
+def test_run_detailed_summary_cell():
+    runner = NotebookRunner()
+    df = _sample_df()
+    cell = {
+        "id": "cell_detailed_summary",
+        "type": "analysis",
+        "analysis_type": "detailed_summary",
+        "config": {"top_n": 3},
+    }
+
+    result = runner.run_cell(cell, df)
+    assert result["type"] == "narrative"
+    assert isinstance(result.get("summary_markdown"), str)
+    assert "Detailed Snapshot Summary" in result["summary_markdown"]
+    assert isinstance(result.get("highlights"), list)
+    assert len(result["highlights"]) > 0
+    assert isinstance(result.get("coverage"), dict)
+    assert "harm_type_pct" in result["coverage"]
+
+
 def test_run_all_collects_errors_and_success():
     runner = NotebookRunner()
     df = _sample_df()
@@ -124,3 +144,73 @@ def test_static_text_cell_uses_content_field():
     result = runner.run_cell(cell, df)
     assert result["type"] == "text"
     assert result["content"] == "hello world"
+
+
+def test_summary_and_detailed_summary_support_custom_field_mapping():
+    runner = NotebookRunner()
+    df = pd.DataFrame(
+        [
+            {
+                "event_date": "2024-01-01",
+                "incident_year": 2024,
+                "risk_label": "privacy",
+                "industry_segment": "healthcare",
+                "responsible_org": "Org A",
+                "model_vendor": "Vendor X",
+            },
+            {
+                "event_date": "2025-01-01",
+                "incident_year": 2025,
+                "risk_label": "bias",
+                "industry_segment": "finance",
+                "responsible_org": "Org B",
+                "model_vendor": "Vendor X",
+            },
+        ]
+    )
+
+    summary = runner.run_cell(
+        {
+            "id": "summary_custom",
+            "type": "analysis",
+            "analysis_type": "summary",
+            "config": {
+                "date_field": "event_date",
+                "top_fields": ["risk_label"],
+                "harm_field": "risk_label",
+                "sector_field": "industry_segment",
+                "deployer_field": "responsible_org",
+                "developer_field": "model_vendor",
+            },
+        },
+        df,
+    )
+    assert summary["top_harm_type"] in {"privacy", "bias"}
+    assert summary["top_sector"] in {"healthcare", "finance"}
+    assert summary["unique_deployers"] == 2
+    assert summary["unique_developers"] == 1
+
+    narrative = runner.run_cell(
+        {
+            "id": "narrative_custom",
+            "type": "analysis",
+            "analysis_type": "detailed_summary",
+            "config": {
+                "top_n": 5,
+                "year_field": "incident_year",
+                "date_field": "event_date",
+                "harm_field": "risk_label",
+                "sector_field": "industry_segment",
+                "deployer_field": "responsible_org",
+                "developer_field": "model_vendor",
+                "primary_label": "Risk label",
+                "secondary_label": "Industry segment",
+                "deployer_label": "Responsible org",
+                "developer_label": "Model vendor",
+            },
+        },
+        df,
+    )
+    assert narrative["type"] == "narrative"
+    assert narrative["field_mapping"]["primary_field"] == "risk_label"
+    assert "Risk label coverage" in narrative["summary_markdown"]

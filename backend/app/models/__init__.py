@@ -1,3 +1,4 @@
+from .merge import MergeOperation
 from .models import Base, User, Dataset, DatasetGroup, ProcessingJob, ProcessingLog, EDAReport, AgentReport, MergeConfig
 from .notebook import Notebook
 
@@ -11,5 +12,6 @@ __all__ = [
     "EDAReport",
     "AgentReport",
     "MergeConfig",
+    "MergeOperation",
     "Notebook",
 ]

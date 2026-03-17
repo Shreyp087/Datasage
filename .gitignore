@@ -27,3 +27,13 @@ frontend/dist/
 *.tmp
 *.temp
 uploads/
+
+# Notebook/cache artifacts
+.ipynb_checkpoints/
+aiid_cache/
+test1/
+/AIID_Research_Notebook.html
+/AIID_Research_Notebook.ipynb
+files (1).zip
+files_new.zip
+prompt-firewall-audit-2026-02-22 (2)_clean.parquet

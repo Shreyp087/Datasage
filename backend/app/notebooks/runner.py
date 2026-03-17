@@ -58,6 +58,7 @@ class NotebookRunner:
             "top_n": self._run_top_n,
             "heatmap": self._run_heatmap,
             "text_sample": self._run_text_sample,
+            "detailed_summary": self._run_detailed_summary,
         }
 
         fn = dispatch.get(atype)
@@ -192,33 +193,90 @@ class NotebookRunner:
             "aggregation": agg,
         }
 
-    def _run_summary(self, df: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
-        del config
+    def _resolve_existing_column(self, df: pd.DataFrame, candidates: list[str | None]) -> str | None:
+        for candidate in candidates:
+            if candidate and candidate in df.columns:
+                return str(candidate)
+        return None
 
-        def top_value(col: str) -> Any:
-            if col not in df.columns or df[col].dropna().empty:
+    def _date_range_from_field(self, df: pd.DataFrame, field: str | None) -> dict[str, Any]:
+        if not field or field not in df.columns:
+            return {"earliest": None, "latest": None, "field": None}
+        parsed = pd.to_datetime(df[field], errors="coerce")
+        if not parsed.notna().any():
+            return {"earliest": None, "latest": None, "field": field}
+        earliest = parsed.min()
+        latest = parsed.max()
+        return {
+            "earliest": earliest.isoformat() if hasattr(earliest, "isoformat") else str(earliest),
+            "latest": latest.isoformat() if hasattr(latest, "isoformat") else str(latest),
+            "field": field,
+        }
+
+    def _run_summary(self, df: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
+        def top_value(col: str | None) -> Any:
+            if not col or col not in df.columns or df[col].dropna().empty:
                 return None
             return df[col].value_counts(dropna=True).index[0]
+
+        date_field = self._resolve_existing_column(
+            df,
+            [
+                config.get("date_field"),
+                "date",
+                "incident_date",
+                "event_date",
+                "created_at",
+            ],
+        )
+        harm_field = self._resolve_existing_column(df, [config.get("harm_field"), "harm_type"])
+        sector_field = self._resolve_existing_column(df, [config.get("sector_field"), "sector_of_deployment"])
+        deployer_field = self._resolve_existing_column(
+            df,
+            [config.get("deployer_field"), "allegeddeployerofaisystem_primary"],
+        )
+        developer_field = self._resolve_existing_column(
+            df,
+            [config.get("developer_field"), "allegeddeveloperofaisystem_primary"],
+        )
+
+        top_fields = [str(field) for field in (config.get("top_fields") or []) if str(field) in df.columns]
+        if not top_fields:
+            top_fields = [field for field in [harm_field, sector_field] if field]
+
+        unique_fields_cfg = config.get("unique_fields") or {}
+        unique_counts: dict[str, int] = {}
+        if isinstance(unique_fields_cfg, dict):
+            for label, field in unique_fields_cfg.items():
+                if field and field in df.columns:
+                    unique_counts[str(label)] = int(df[str(field)].nunique(dropna=True))
+        elif isinstance(unique_fields_cfg, list):
+            for field in unique_fields_cfg:
+                if field and str(field) in df.columns:
+                    unique_counts[str(field)] = int(df[str(field)].nunique(dropna=True))
+
+        if deployer_field:
+            unique_counts.setdefault("deployer", int(df[deployer_field].nunique(dropna=True)))
+        if developer_field:
+            unique_counts.setdefault("developer", int(df[developer_field].nunique(dropna=True)))
+
+        top_values = {
+            field: top_value(field)
+            for field in top_fields
+        }
 
         return {
             "type": "stats",
             "total_incidents": int(len(df)),
-            "date_range": {
-                "earliest": str(df["date"].min()) if "date" in df.columns else None,
-                "latest": str(df["date"].max()) if "date" in df.columns else None,
-            },
-            "unique_deployers": (
-                int(df["allegeddeployerofaisystem_primary"].nunique(dropna=True))
-                if "allegeddeployerofaisystem_primary" in df.columns
-                else None
-            ),
-            "unique_developers": (
-                int(df["allegeddeveloperofaisystem_primary"].nunique(dropna=True))
-                if "allegeddeveloperofaisystem_primary" in df.columns
-                else None
-            ),
-            "top_harm_type": top_value("harm_type"),
-            "top_sector": top_value("sector_of_deployment"),
+            "total_rows": int(len(df)),
+            "column_count": int(len(df.columns)),
+            "date_range": self._date_range_from_field(df, date_field),
+            "unique_counts": unique_counts,
+            "top_values": top_values,
+            "unique_deployers": int(df[deployer_field].nunique(dropna=True)) if deployer_field else None,
+            "unique_developers": int(df[developer_field].nunique(dropna=True)) if developer_field else None,
+            "top_harm_type": top_value(harm_field),
+            "top_sector": top_value(sector_field),
         }
 
     def _run_correlation(self, df: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
@@ -318,6 +376,155 @@ class NotebookRunner:
             "field": field,
         }
 
+    def _run_detailed_summary(self, df: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
+        top_n = int(config.get("top_n", 5))
+        total = int(len(df))
+
+        year_counts_df = pd.DataFrame(columns=["year", "count"])
+        year_field = self._resolve_existing_column(df, [config.get("year_field"), "year"])
+        date_field = self._resolve_existing_column(df, [config.get("date_field"), "date", "incident_date", "event_date"])
+        if year_field:
+            years = pd.to_numeric(df[year_field], errors="coerce")
+            if years.notna().any():
+                year_counts_df = (
+                    years.dropna()
+                    .astype(int)
+                    .value_counts()
+                    .sort_index()
+                    .rename_axis("year")
+                    .reset_index(name="count")
+                )
+        elif date_field:
+            dates = pd.to_datetime(df[date_field], errors="coerce")
+            if dates.notna().any():
+                year_counts_df = (
+                    dates.dt.year.dropna()
+                    .astype(int)
+                    .value_counts()
+                    .sort_index()
+                    .rename_axis("year")
+                    .reset_index(name="count")
+                )
+
+        harm_field = self._resolve_existing_column(df, [config.get("harm_field"), "harm_type"])
+        sector_field = self._resolve_existing_column(df, [config.get("sector_field"), "sector_of_deployment"])
+        deployer_field = self._resolve_existing_column(
+            df,
+            [config.get("deployer_field"), "allegeddeployerofaisystem_primary"],
+        )
+        developer_field = self._resolve_existing_column(
+            df,
+            [config.get("developer_field"), "allegeddeveloperofaisystem_primary"],
+        )
+
+        top_harms = self._top_counts(df, harm_field, top_n)
+        top_sectors = self._top_counts(df, sector_field, top_n)
+        top_deployers = self._top_counts(df, deployer_field, top_n)
+        top_developers = self._top_counts(df, developer_field, top_n)
+
+        coverage = {
+            "harm_type_pct": self._coverage_pct(df, harm_field),
+            "sector_of_deployment_pct": self._coverage_pct(df, sector_field),
+            "deployer_pct": self._coverage_pct(df, deployer_field),
+            "developer_pct": self._coverage_pct(df, developer_field),
+            "date_pct": self._coverage_pct(df, date_field),
+        }
+        coverage["field_coverage"] = {
+            field: self._coverage_pct(df, field)
+            for field in [harm_field, sector_field, deployer_field, developer_field, date_field]
+            if field
+        }
+
+        primary_label = str(config.get("primary_label") or "Top categories")
+        secondary_label = str(config.get("secondary_label") or "Secondary categories")
+        deployer_label = str(config.get("deployer_label") or "Top entities")
+        developer_label = str(config.get("developer_label") or "Secondary entities")
+
+        trend_note = "Insufficient data for long-term trend analysis."
+        yoy_change_pct: float | None = None
+        if len(year_counts_df) >= 2:
+            first_year = int(year_counts_df.iloc[0]["year"])
+            first_count = float(year_counts_df.iloc[0]["count"])
+            last_year = int(year_counts_df.iloc[-1]["year"])
+            last_count = float(year_counts_df.iloc[-1]["count"])
+            if first_count > 0:
+                yoy_change_pct = ((last_count - first_count) / first_count) * 100.0
+            peak = year_counts_df.loc[year_counts_df["count"].idxmax()]
+            trend_note = (
+                f"Incident volume shifted from {int(first_count)} in {first_year} "
+                f"to {int(last_count)} in {last_year}. Peak year was "
+                f"{int(peak['year'])} with {int(peak['count'])} incidents."
+            )
+
+        highlights: list[str] = [f"Total documented incidents analyzed: {total:,}."]
+        if trend_note:
+            highlights.append(trend_note)
+        if top_harms:
+            top = top_harms[0]
+            highlights.append(
+                f"Most common value for {primary_label.lower()}: {top.get('value', 'Unknown')} "
+                f"({int(top.get('count', 0)):,} incidents, {float(top.get('percentage', 0.0)):.1f}%)."
+            )
+        if top_sectors:
+            top = top_sectors[0]
+            highlights.append(
+                f"Top value for {secondary_label.lower()}: {top.get('value', 'Unknown')} "
+                f"({int(top.get('count', 0)):,} incidents)."
+            )
+        if top_deployers:
+            top = top_deployers[0]
+            highlights.append(
+                f"Leading value for {deployer_label.lower()}: {top.get('value', 'Unknown')}."
+            )
+        if top_developers:
+            top = top_developers[0]
+            highlights.append(
+                f"Leading value for {developer_label.lower()}: {top.get('value', 'Unknown')}."
+            )
+
+        markdown = self._build_detailed_summary_markdown(
+            total=total,
+            year_counts=year_counts_df,
+            top_harms=top_harms,
+            top_sectors=top_sectors,
+            top_deployers=top_deployers,
+            top_developers=top_developers,
+            highlights=highlights,
+            coverage=coverage,
+            labels={
+                "top_harms": primary_label,
+                "top_sectors": secondary_label,
+                "top_deployers": deployer_label,
+                "top_developers": developer_label,
+                "harm_coverage": f"{primary_label} coverage",
+                "sector_coverage": f"{secondary_label} coverage",
+                "deployer_coverage": f"{deployer_label} coverage",
+                "developer_coverage": f"{developer_label} coverage",
+                "date_coverage": "Date coverage",
+            },
+        )
+
+        return {
+            "type": "narrative",
+            "summary_markdown": markdown,
+            "highlights": highlights,
+            "yearly_incidents": self._records(year_counts_df),
+            "top_harm_types": top_harms,
+            "top_sectors": top_sectors,
+            "top_deployers": top_deployers,
+            "top_developers": top_developers,
+            "coverage": coverage,
+            "trend_change_pct": yoy_change_pct,
+            "field_mapping": {
+                "year_field": year_field,
+                "date_field": date_field,
+                "primary_field": harm_field,
+                "secondary_field": sector_field,
+                "deployer_field": deployer_field,
+                "developer_field": developer_field,
+            },
+        }
+
     def _apply_filters(self, df: pd.DataFrame, filters: dict[str, Any]) -> pd.DataFrame:
         for col, val in filters.items():
             if col not in df.columns:
@@ -363,6 +570,79 @@ class NotebookRunner:
             f"to {line.iloc[-1][x_field]}. Peak was in {peak_row[x_field]} "
             f"with {int(peak_row['count'])} incidents."
         )
+
+    def _top_counts(self, df: pd.DataFrame, field: str | None, n: int) -> list[dict[str, Any]]:
+        if not field or field not in df.columns:
+            return []
+        series = df[field].dropna().astype(str)
+        if series.empty:
+            return []
+        counts = (
+            series.value_counts()
+            .head(n)
+            .rename_axis("value")
+            .reset_index(name="count")
+        )
+        counts["percentage"] = ((counts["count"] / max(len(series), 1)) * 100.0).round(1)
+        return self._records(counts)
+
+    def _coverage_pct(self, df: pd.DataFrame, field: str | None) -> float:
+        if not field or field not in df.columns or len(df) == 0:
+            return 0.0
+        return round(float(df[field].notna().mean() * 100.0), 1)
+
+    def _build_detailed_summary_markdown(
+        self,
+        *,
+        total: int,
+        year_counts: pd.DataFrame,
+        top_harms: list[dict[str, Any]],
+        top_sectors: list[dict[str, Any]],
+        top_deployers: list[dict[str, Any]],
+        top_developers: list[dict[str, Any]],
+        highlights: list[str],
+        coverage: dict[str, float],
+        labels: dict[str, str] | None = None,
+    ) -> str:
+        labels = labels or {}
+
+        def _fmt_list(items: list[dict[str, Any]], label: str) -> str:
+            if not items:
+                return f"- {label}: N/A"
+            top = items[:3]
+            bits = [
+                f"{entry.get('value', 'Unknown')} ({int(entry.get('count', 0)):,})"
+                for entry in top
+            ]
+            return f"- {label}: " + ", ".join(bits)
+
+        lines: list[str] = [
+            "### Detailed Snapshot Summary",
+            "",
+            f"- Total incidents analyzed: **{total:,}**",
+            _fmt_list(top_harms, labels.get("top_harms", "Top harm types")),
+            _fmt_list(top_sectors, labels.get("top_sectors", "Top sectors")),
+            _fmt_list(top_deployers, labels.get("top_deployers", "Top deployers")),
+            _fmt_list(top_developers, labels.get("top_developers", "Top developers")),
+            "",
+            "#### Coverage",
+            f"- {labels.get('harm_coverage', 'Harm type coverage')}: **{coverage.get('harm_type_pct', 0.0):.1f}%**",
+            f"- {labels.get('sector_coverage', 'Sector coverage')}: **{coverage.get('sector_of_deployment_pct', 0.0):.1f}%**",
+            f"- {labels.get('deployer_coverage', 'Deployer coverage')}: **{coverage.get('deployer_pct', 0.0):.1f}%**",
+            f"- {labels.get('developer_coverage', 'Developer coverage')}: **{coverage.get('developer_pct', 0.0):.1f}%**",
+            f"- {labels.get('date_coverage', 'Incident date coverage')}: **{coverage.get('date_pct', 0.0):.1f}%**",
+            "",
+            "#### Key Highlights",
+        ]
+        lines.extend([f"- {msg}" for msg in highlights])
+
+        if not year_counts.empty:
+            lines.append("")
+            lines.append("#### Yearly Trend")
+            for row in year_counts.to_dict(orient="records"):
+                lines.append(f"- {int(row.get('year'))}: {int(row.get('count', 0)):,} incidents")
+
+        return "\n".join(lines)
 
     def _records(self, frame: pd.DataFrame) -> list[dict[str, Any]]:
         return [self._dict_safe(row) for row in frame.to_dict(orient="records")]

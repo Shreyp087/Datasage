@@ -3,6 +3,17 @@ import pandas as pd
 import dask.dataframe as dd
 from .base import PipelineStep, PipelineContext, StepResult
 
+
+def _safe_nunique(series: pd.Series) -> int:
+    try:
+        return int(series.nunique(dropna=True))
+    except TypeError:
+        non_null = series.dropna()
+        if non_null.empty:
+            return 0
+        return int(non_null.astype(str).nunique(dropna=True))
+
+
 class EncoderSuggester(PipelineStep):
     def run(self, df: Any, context: PipelineContext) -> StepResult:
         """
@@ -31,7 +42,7 @@ class EncoderSuggester(PipelineStep):
             elif role == "text_col":
                 suggestion = "TF-IDF or Embeddings"
             elif pd.api.types.is_object_dtype(dtype) or pd.api.types.is_categorical_dtype(dtype):
-                nunique = sample_df[col].nunique()
+                nunique = _safe_nunique(sample_df[col])
                 if nunique <= 10:
                     suggestion = "One-Hot Encoding"
                 elif 10 < nunique <= 50:

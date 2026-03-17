@@ -1,8 +1,45 @@
-import pandas as pd
-import dask.dataframe as dd
+import json
 from typing import Any
+
+import dask.dataframe as dd
+import pandas as pd
+
 from .base import PipelineStep, PipelineContext, StepResult
 from app.core.domain_profiles import get_domain_profile, to_pipeline_role
+
+
+def _stable_value_token(value: Any) -> str:
+    """Return a deterministic string token for unhashable Python objects."""
+    if isinstance(value, dict):
+        try:
+            return json.dumps(value, sort_keys=True, default=str, ensure_ascii=False)
+        except Exception:
+            return repr(value)
+    if isinstance(value, set):
+        try:
+            return json.dumps(sorted(value, key=lambda item: str(item)), default=str, ensure_ascii=False)
+        except Exception:
+            return repr(value)
+    if isinstance(value, (list, tuple)):
+        try:
+            return json.dumps(value, default=str, ensure_ascii=False)
+        except Exception:
+            return repr(value)
+    return str(value)
+
+
+def _safe_nunique(series: pd.Series) -> int:
+    """
+    Count unique non-null values even when cells contain unhashable objects
+    (for example dict/list from JSON-like datasets).
+    """
+    try:
+        return int(series.nunique(dropna=True))
+    except TypeError:
+        non_null = series.dropna()
+        if non_null.empty:
+            return 0
+        return int(non_null.map(_stable_value_token).nunique(dropna=True))
 
 class SchemaAnalyzer(PipelineStep):
     def run(self, df: Any, context: PipelineContext) -> StepResult:
@@ -22,6 +59,8 @@ class SchemaAnalyzer(PipelineStep):
         else:
             sample_df = df
             total_rows = len(df)
+
+        sample_rows = len(sample_df)
             
         for col in df.columns:
             profile_meta = known_columns.get(col)
@@ -42,13 +81,13 @@ class SchemaAnalyzer(PipelineStep):
             dtype = sample_df[col].dtype
             
             # Constant detection
-            nunique = sample_df[col].nunique()
-            if nunique == 1:
+            nunique = _safe_nunique(sample_df[col])
+            if sample_rows > 0 and nunique == 1:
                 role = "constant_col"
                 context.warnings.append(f"Column '{col}' is constant (1 unique value) and flagged for potential drop.")
             
             # ID Detection
-            elif (nunique / len(sample_df)) > 0.95:
+            elif sample_rows > 0 and (nunique / sample_rows) > 0.95:
                 if "id" in col.lower() or "key" in col.lower() or "uuid" in col.lower() or pd.api.types.is_integer_dtype(dtype):
                     role = "id_col"
             

@@ -2,6 +2,7 @@ import os
 import tempfile
 import traceback
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
@@ -28,9 +29,11 @@ from app.models.models import (
 )
 from app.models.notebook import Notebook
 from app.notebooks.runner import NotebookRunner
+from app.notebooks.templates.dynamic_template import build_dynamic_notebook_template
 from app.pipeline.loader import DatasetLoader
 from app.pipeline.preprocessor import PreprocessingOrchestrator
 from app.pipeline.steps.base import PipelineContext
+from app.utils.parquet import prepare_dataframe_for_parquet
 from celery_app import celery_app
 from workers.progress import update_job_progress
 
@@ -94,6 +97,122 @@ def _load_dataframe_for_notebook(dataset: Dataset, temp_path: str) -> pd.DataFra
     if fmt == "excel":
         return pd.read_excel(temp_path, sheet_name=0, engine="openpyxl")
     raise ValueError(f"Unsupported dataset format for notebook execution: {fmt}")
+
+
+def _domain_value(dataset: Dataset) -> str:
+    if hasattr(dataset.domain, "value"):
+        return str(dataset.domain.value)
+    return str(dataset.domain or "")
+
+
+def _extract_snapshot_meta(dataset: Dataset) -> tuple[str | None, str | None]:
+    schema = dataset.schema_json if isinstance(dataset.schema_json, dict) else {}
+    snapshot_date = schema.get("snapshot_date")
+    snapshot_url = schema.get("snapshot_url")
+    return (
+        str(snapshot_date) if snapshot_date is not None else None,
+        str(snapshot_url) if snapshot_url is not None else None,
+    )
+
+
+def _reset_cells(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    for cell in cells or []:
+        item = deepcopy(cell)
+        item["result"] = None
+        item["executed_at"] = None
+        item.pop("status", None)
+        item.pop("error", None)
+        cleaned.append(item)
+    return cleaned
+
+
+def _auto_generate_dataset_notebook(session: Any, dataset: Dataset, df_clean: pd.DataFrame) -> Notebook:
+    domain = _domain_value(dataset)
+    snapshot_date, snapshot_url = _extract_snapshot_meta(dataset)
+    now = _now()
+    template = build_dynamic_notebook_template(
+        dataset_name=dataset.name or "Uploaded Dataset",
+        domain=domain,
+        df=df_clean,
+        snapshot_date=snapshot_date,
+        snapshot_url=snapshot_url,
+    )
+    tags = list(
+        dict.fromkeys(
+            [
+                *(template.get("tags") or []),
+                "auto-generated",
+                "per-upload",
+                domain or "general",
+            ]
+        )
+    )
+
+    existing = (
+        session.query(Notebook)
+        .filter(
+            Notebook.dataset_id == dataset.id,
+            Notebook.user_id == dataset.user_id,
+            Notebook.is_template.is_(False),
+            Notebook.domain == domain,
+        )
+        .order_by(Notebook.updated_at.desc())
+        .first()
+    )
+
+    cells = _reset_cells(deepcopy(template.get("cells") or []))
+    notebook_like = type("NotebookLike", (), {"cells": cells})()
+    runner = NotebookRunner()
+    results = runner.run_all(notebook_like, df_clean)
+    annotated_cells = runner.annotate_cells_with_results(cells, results)
+
+    if existing:
+        notebook = existing
+        notebook.title = str(template.get("title") or f"Auto Notebook - {dataset.name}")
+        notebook.description = str(
+            template.get("description")
+            or (
+                "Auto-generated and executed notebook for this uploaded dataset. "
+                "Template sections are customized to detected columns."
+            )
+        )
+        notebook.cells = annotated_cells
+        notebook.results = results
+        notebook.tags = tags
+        notebook.snapshot_date = snapshot_date
+        notebook.snapshot_url = snapshot_url
+        notebook.run_count = int(notebook.run_count or 0) + 1
+        notebook.last_run_at = now
+        notebook.updated_at = now
+        return notebook
+
+    notebook = Notebook(
+        user_id=dataset.user_id,
+        dataset_id=dataset.id,
+        title=str(template.get("title") or f"Auto Notebook - {dataset.name}"),
+        description=str(
+            template.get("description")
+            or (
+                "Auto-generated and executed notebook for this uploaded dataset. "
+                "Template sections are customized to detected columns."
+            )
+        ),
+        domain=domain,
+        cells=annotated_cells,
+        results=results,
+        is_template=False,
+        is_public=False,
+        tags=tags,
+        snapshot_date=snapshot_date,
+        snapshot_url=snapshot_url,
+        run_count=1,
+        last_run_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(notebook)
+    return notebook
 
 
 def update_db_status(
@@ -265,6 +384,10 @@ def process_dataset(self: Task, dataset_id: str, options: dict | None = None) ->
         else:
             raise ValueError("Preprocessing pipeline did not return a DataFrame")
 
+        # Guard parquet serialization against mixed object columns
+        # (e.g. strings + datetime objects in the same object-typed column).
+        df_clean_pd = prepare_dataframe_for_parquet(df_clean_pd)
+
         with tempfile.NamedTemporaryFile(delete=False, suffix="_clean.parquet") as temp_clean_file:
             clean_path = temp_clean_file.name
         df_clean_pd.to_parquet(clean_path, index=False)
@@ -338,7 +461,11 @@ def process_dataset(self: Task, dataset_id: str, options: dict | None = None) ->
             dataset = session.get(Dataset, uuid.UUID(dataset_id))
             if dataset:
                 dataset.status = DatasetStatusEnum.agents_running
-                dataset.schema_json = eda_summary.get("columns")
+                existing_schema = dataset.schema_json if isinstance(dataset.schema_json, dict) else {}
+                dataset.schema_json = {
+                    **existing_schema,
+                    "columns": eda_summary.get("columns") or [],
+                }
             job = session.get(ProcessingJob, uuid.UUID(job_id))
             if job:
                 job.status = DatasetStatusEnum.agents_running
@@ -362,6 +489,16 @@ def process_dataset(self: Task, dataset_id: str, options: dict | None = None) ->
             processing_logs=[log.get("reason") or log.get("action", "") for log in all_logs][:20],
         )
 
+        notebook_id: str | None = None
+        _record_progress(
+            dataset_id,
+            job_id,
+            DatasetStatusEnum.agents_running.value,
+            90,
+            "notebook_generation",
+            "Generating dynamic per-dataset notebook boilerplate...",
+        )
+
         with SyncSessionLocal() as session:
             for result in agent_results:
                 session.add(
@@ -379,6 +516,22 @@ def process_dataset(self: Task, dataset_id: str, options: dict | None = None) ->
 
             dataset = session.get(Dataset, uuid.UUID(dataset_id))
             if dataset:
+                auto_notebook = _auto_generate_dataset_notebook(session, dataset, df_clean_pd)
+                notebook_id = str(auto_notebook.id)
+                session.add(
+                    ProcessingLog(
+                        job_id=uuid.UUID(job_id),
+                        step_name="notebook_generation",
+                        action="auto_generate_notebook",
+                        column_name=None,
+                        before_value=None,
+                        after_value={"notebook_id": notebook_id, "run_count": int(auto_notebook.run_count or 0)},
+                        reason="Auto-generated and executed dynamic notebook for uploaded dataset.",
+                        severity=SeverityEnum.info,
+                    )
+                )
+
+            if dataset:
                 dataset.status = DatasetStatusEnum.complete
                 dataset.completed_at = _now()
 
@@ -391,8 +544,14 @@ def process_dataset(self: Task, dataset_id: str, options: dict | None = None) ->
 
             session.commit()
 
-        update_job_progress(job_id, 100, "complete", "Analysis complete!")
-        return {"status": "complete", "dataset_id": dataset_id}
+        done_message = "Analysis complete!"
+        if notebook_id:
+            done_message += f" Notebook generated: {notebook_id}"
+        update_job_progress(job_id, 100, "complete", done_message)
+        payload: dict[str, Any] = {"status": "complete", "dataset_id": dataset_id}
+        if notebook_id:
+            payload["notebook_id"] = notebook_id
+        return payload
 
     except MemoryError:
         update_job_progress(
